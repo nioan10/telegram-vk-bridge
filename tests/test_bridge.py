@@ -50,6 +50,17 @@ def private_update(number=1, text="Личное объявление", sender=77
 
 
 class ContentTests(unittest.TestCase):
+    def test_all_mode_config_keeps_tags_and_ignores_service_events(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {}, clear=True):
+            path = Path(directory) / ".env"
+            path.write_text("HASHTAG=OFF\nSTRIP_HASHTAG=true\n", encoding="utf-8")
+            cfg = Config.load(path, "status")
+        self.assertEqual(cfg.hashtag, "off")
+        item = extract(message(text="#важно Остаётся в тексте"), cfg)
+        self.assertTrue(item["selected"])
+        self.assertIn("#важно", item["text"])
+        self.assertFalse(extract(message(text="", pinned_message={"message_id": 9}), cfg)["selected"])
+
     def test_forwarded_author_is_preserved(self):
         msg = message(forward_origin={"type": "hidden_user", "sender_user_name": "Иван"})
         self.assertEqual(extract(msg, CFG)["author"], "Переслано от: Иван")
@@ -107,6 +118,39 @@ class StoreFixture(unittest.TestCase):
 
 
 class StateTests(StoreFixture):
+    def test_tag_off_forwards_content_and_preserves_scope_and_restart(self):
+        replies = self.store.ingest([private_update(1, "/tag OFF"),
+            update(2, text="Без тега"), photo_update(3),
+            update(4, text="Чужой чат", chat={"id": -999, "type": "supergroup"}),
+            update(5, text="Старое", date=99),
+            update(6, text="", new_chat_title="Новая тема"),
+            update(7, text="Закрыто", has_protected_content=True),
+            private_update(8, "Чужая личка", sender=88)], CFG, now=101)
+        self.assertIn("все новые сообщения", replies[0]["text"])
+        self.assertEqual([j["id"] for j in self.store.due(now=102)], ["-10042:msg:2", "-10042:msg:3"])
+        self.store.close()
+        self.store = Store(self.directory)
+        self.store.start(CFG, 123)
+        self.assertEqual(self.store.get("hashtag"), "off")
+        self.store.ingest([update(9, text="После перезапуска")], CFG, now=102)
+        self.assertEqual(len(self.store.due(now=103)), 3)
+
+    def test_tag_off_can_restore_filter_in_same_batch(self):
+        self.store.ingest([private_update(1, "/tag off"), update(2, text="Проходит"),
+            private_update(3, "/tag #важно"), update(4, text="Не проходит"), update(5)], CFG, now=101)
+        self.assertEqual([j["id"] for j in self.store.due(now=102)], ["-10042:msg:2", "-10042:msg:5"])
+        self.assertEqual(self.store.get("hashtag"), "#важно")
+
+    def test_tag_off_album_status_and_owner_only(self):
+        self.assertEqual(self.store.ingest([private_update(1, "/tag off", sender=88)], CFG, now=101), [])
+        self.assertEqual(self.store.get("hashtag"), "#важно")
+        self.store.ingest([private_update(2, "/tag off"), photo_update(3, "album"), photo_update(4, "album")], CFG, now=101)
+        job = self.store.due(now=110)[0]
+        self.assertEqual(job["selected"], 1)
+        self.assertEqual(len(json.loads(job["body"])), 2)
+        replies = self.store.ingest([private_update(5, "/tag"), private_update(6, "/status")], CFG, now=102)
+        self.assertTrue(all("без фильтра по хештегу" in r["text"] for r in replies))
+
     def test_only_owner_can_submit_private_messages(self):
         events = [private_update(1), private_update(2, sender=88),
                   private_update(3, **{"from": {"id": 88}})]
@@ -139,7 +183,7 @@ class StateTests(StoreFixture):
         self.assertFalse(self.store.due(now=102))
 
     def test_invalid_tag_preserves_setting(self):
-        for number, command in enumerate(("/tag off", "/tag #два #тега", "/tag #"), 1):
+        for number, command in enumerate(("/tag on", "/tag #два #тега", "/tag #"), 1):
             replies = self.store.ingest([private_update(number, command)], CFG, now=101)
             self.assertIn("не изменена", replies[0]["text"])
             self.assertEqual(self.store.get("hashtag"), "#важно")

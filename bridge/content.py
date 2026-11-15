@@ -22,7 +22,9 @@ def extract(message, config):
     text = message.get("text") or message.get("caption") or ""
     entities = message.get("entities") if "text" in message else message.get("caption_entities")
     entities = entities or []
-    selected = any(e.get("type") == "hashtag"
+    # Service updates (joins, pins, title changes) are not user messages to relay.
+    has_content = bool(text or message.get("photo") or any(key in message for key in UNSUPPORTED))
+    selected = (config.hashtag == "off" and has_content) or any(e.get("type") == "hashtag"
                    and entity_text(text, e).casefold() == config.hashtag.casefold()
                    for e in entities)
     # Entity offsets are UTF-16 units; apply changes backwards to preserve offsets.

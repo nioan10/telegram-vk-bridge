@@ -67,7 +67,7 @@ class Config:
             vk_peer_id=integer("VK_PEER_ID", 0),
             telegram_owner_id=integer("TELEGRAM_OWNER_ID", 0),
             private_inbox_enabled=boolean("PRIVATE_INBOX_ENABLED", "true"),
-            hashtag=env.get("HASHTAG", "#важно"),
+            hashtag="off" if env.get("HASHTAG", "").casefold() == "off" else env.get("HASHTAG", "#важно"),
             strip_hashtag=boolean("STRIP_HASHTAG", "false"),
             include_author=boolean("INCLUDE_AUTHOR", "true"),
             album_wait=integer("ALBUM_WAIT_SECONDS", 5),
@@ -87,8 +87,8 @@ class Config:
                 raise ConfigError("VK_PEER_ID должен быть ID беседы из discover-vk.")
             if cfg.private_inbox_enabled and cfg.telegram_owner_id <= 0:
                 raise ConfigError("Заполните TELEGRAM_OWNER_ID через discover-owner для личной отправки.")
-        if not re.fullmatch(r"#[\w]+", cfg.hashtag, re.UNICODE):
-            raise ConfigError("HASHTAG должен содержать один хештег, например #важно.")
+        if cfg.hashtag != "off" and not re.fullmatch(r"#[\w]+", cfg.hashtag, re.UNICODE):
+            raise ConfigError("HASHTAG должен содержать один хештег, например #важно, или off для всех сообщений.")
         if not 2 <= cfg.album_wait <= 60:
             raise ConfigError("ALBUM_WAIT_SECONDS должен быть от 2 до 60.")
         if not re.fullmatch(r"\d+\.\d+", cfg.vk_version):

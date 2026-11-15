@@ -10,6 +10,7 @@ import time
 from . import __version__
 from .api import APIError, Telegram, VK
 from .config import Config, ConfigError
+from .commands import filter_description
 from .service import check, run
 from .state import Store, process_lock, read_status
 
@@ -103,7 +104,7 @@ def main():
             if args.command == "healthcheck":
                 return 0 if time.time() - int(meta.get("heartbeat", 0)) < 180 else 1
             print("Очередь:", counts or "пока пуста")
-            print("Хештег общего чата:", meta.get("hashtag", cfg.hashtag))
+            print("Фильтр общего чата:", filter_description(meta.get("hashtag", cfg.hashtag)))
             if meta.get("last_sent"):
                 print("Последняя доставка (UTC):", datetime.fromtimestamp(int(meta["last_sent"]), timezone.utc).isoformat())
             for job_id, error in failures:
