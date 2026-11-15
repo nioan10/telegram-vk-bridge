@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 import hashlib
 import json
@@ -201,7 +201,7 @@ def read_status(directory):
     path = (Path(directory) / "bridge.sqlite3").resolve()
     if not path.exists():
         raise ConfigError("База ещё не создана: сначала запустите run.")
-    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
         counts = dict(db.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status"))
         meta = dict(db.execute("SELECT key,value FROM meta WHERE key IN ('heartbeat','last_sent','hashtag')"))
         failures = db.execute("SELECT id,error FROM jobs WHERE status='failed' ORDER BY due LIMIT 10").fetchall()
