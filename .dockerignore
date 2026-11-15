@@ -1,0 +1,5 @@
+**
+!bridge/
+!bridge/*.py
+!.env.example
+!Dockerfile
