@@ -414,6 +414,20 @@ class APITests(unittest.TestCase):
         self.assertNotIn(b"SECRET", transport.request.call_args.args[2])
         self.assertIn(b'name="photo"', transport.request.call_args.args[2])
 
+    def test_only_vk_upload_405_is_transient(self):
+        for service, status, retryable in [("VK upload", 405, True), ("VK", 405, False),
+                                           ("Telegram", 405, False), ("VK upload", 403, False),
+                                           ("VK upload", 415, False)]:
+            with self.subTest(service=service, status=status):
+                transport = Transport()
+                transport.opener = Mock()
+                transport.opener.open.side_effect = HTTPError(
+                    "https://upload.vk.com/?SECRET", status, "SECRET", {}, BytesIO(b"SECRET"))
+                with self.assertRaises(APIError) as error:
+                    transport.request("https://upload.vk.com/?SECRET", service, b"multipart")
+                self.assertEqual(error.exception.retryable, retryable)
+                self.assertNotIn("SECRET", str(error.exception))
+
     def test_send_disables_mentions_and_previews(self):
         vk = VK("token")
         vk.call = Mock()

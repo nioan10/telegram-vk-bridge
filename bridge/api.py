@@ -48,8 +48,12 @@ class Transport:
                 pass
             finally:
                 exc.close()
+            # VK's upload edge sometimes returns 405 for a valid multipart POST;
+            # fetching a fresh upload URL and retrying the same file succeeds.
+            # Keep ordinary API/method and permission errors permanent.
+            upload_unavailable = service == "VK upload" and exc.code == 405
             raise APIError(service, f"HTTP_{exc.code}",
-                           exc.code in (408, 429) or exc.code >= 500, delay) from None
+                           upload_unavailable or exc.code in (408, 429) or exc.code >= 500, delay) from None
         except (URLError, OSError, TimeoutError, http.client.HTTPException):
             raise APIError(service, "NETWORK", True) from None
         if len(body) > limit:

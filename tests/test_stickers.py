@@ -8,10 +8,11 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 
 from PIL import Image
 
-from bridge.api import APIError, MAX_STICKER_BYTES, Telegram, VK
+from bridge.api import APIError, MAX_STICKER_BYTES, Telegram, Transport, VK
 from bridge.content import extract, render
 from bridge.service import deliver
 from bridge.stickers import convert_sticker, MAX_JSON
@@ -89,6 +90,34 @@ class ConversionTests(unittest.TestCase):
 
 
 class StickerDeliveryTests(StoreFixture):
+    def test_upload_405_retries_with_fresh_url_without_losing_sticker(self):
+        self.store.ingest([private_update(text="", sticker={"file_id": "test"})], CFG, now=101)
+        tg = Mock(); tg.sticker.return_value = b"webp"
+        transport = Transport(); transport.opener = Mock()
+        transport.opener.open.side_effect = [
+            HTTPError("https://upload.vk.com/old", 405, "Unavailable", {}, BytesIO(b"")),
+            BytesIO(b'{"photo":"p","server":1,"hash":"h"}')]
+        vk = VK("test", transport=transport)
+        vk.call = Mock(side_effect=[{"upload_url": "https://upload.vk.com/old"},
+                                   {"upload_url": "https://upload.vk.com/fresh"},
+                                   [{"id": 2, "owner_id": -1}], 42])
+        with patch("bridge.service.convert_sticker", return_value=(b"PNG", "png")):
+            job = self.store.due(now=102)[0]
+            with self.assertRaises(APIError) as error:
+                deliver(job, self.store, CFG, tg, vk)
+            self.store.failure(job, error.exception, now=102)
+            self.assertFalse(self.store.due(now=103))
+            retry = self.store.due(now=104)[0]
+            self.assertEqual(retry["status"], "pending")
+            self.assertIn("sticker", retry["body"])
+            deliver(retry, self.store, CFG, tg, vk)
+        urls = [call.args[0].full_url for call in transport.opener.open.call_args_list]
+        self.assertEqual(urls, ["https://upload.vk.com/old", "https://upload.vk.com/fresh"])
+        sends = [call for call in vk.call.call_args_list if call.args[0] == "messages.send"]
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0].kwargs["attachment"], "photo-1_2")
+        self.assertEqual(self.store.db.execute("SELECT status FROM jobs").fetchone()[0], "done")
+
     def test_private_sticker_and_retry_reuse_uploaded_attachment(self):
         self.store.ingest([private_update(text="", sticker={"file_id": "test", "is_animated": True})], CFG, now=101)
         job = self.store.due(now=102)[0]; tg, vk = Mock(), Mock()
