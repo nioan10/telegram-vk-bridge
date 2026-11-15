@@ -3,3 +3,4 @@
 !bridge/*.py
 !.env.example
 !Dockerfile
+!requirements.txt

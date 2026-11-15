@@ -9,6 +9,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 
 MAX_PHOTO_BYTES = 20 * 1024 * 1024
+MAX_STICKER_BYTES = 4 * 1024 * 1024
 
 
 class APIError(Exception):
@@ -86,15 +87,21 @@ class Telegram:
                          allowed_updates=json.dumps(["message"]))
 
     def photo(self, file_id):
+        return self.download(file_id, MAX_PHOTO_BYTES, "PHOTO_TOO_LARGE")
+
+    def sticker(self, file_id):
+        return self.download(file_id, MAX_STICKER_BYTES, "STICKER_TOO_LARGE")
+
+    def download(self, file_id, limit, size_error):
         info = self.call("getFile", file_id=file_id)
-        if info.get("file_size", 0) > MAX_PHOTO_BYTES:
-            raise APIError("Telegram", "PHOTO_TOO_LARGE")
+        if info.get("file_size", 0) > limit:
+            raise APIError("Telegram", size_error)
         path = info.get("file_path")
         if not path or ".." in path.split("/"):
             raise APIError("Telegram", "INVALID_FILE_PATH")
         return self.transport.request(
             f"https://api.telegram.org/file/bot{self.token}/{quote(path, safe='/')}",
-            "Telegram file", limit=MAX_PHOTO_BYTES, raw=True)
+            "Telegram file", limit=limit, raw=True)
 
 
 class VK:
@@ -120,7 +127,7 @@ class VK:
             raise APIError("VK", "INVALID_RESPONSE", True)
         return result["response"]
 
-    def upload_photo(self, peer_id, content):
+    def upload_photo(self, peer_id, content, *, png=False):
         server = self.call("photos.getMessagesUploadServer", peer_id=peer_id)
         url = server.get("upload_url", "")
         parsed = urlsplit(url)
@@ -128,8 +135,9 @@ class VK:
             raise APIError("VK upload", "INVALID_UPLOAD_URL")
         # URL is returned by the authenticated VK API, never taken from a chat message.
         boundary = "bridge-" + uuid.uuid4().hex
+        filename, mime = ("sticker.png", "image/png") if png else ("photo.jpg", "image/jpeg")
         body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; "
-                'filename="photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n').encode()
+                f'filename="{filename}"\r\nContent-Type: {mime}\r\n\r\n').encode()
         body += content + f"\r\n--{boundary}--\r\n".encode()
         uploaded = self.transport.request(url, "VK upload", body,
                                           {"Content-Type": f"multipart/form-data; boundary={boundary}"})
@@ -145,6 +153,29 @@ class VK:
         attachment = f"photo{photo['owner_id']}_{photo['id']}"
         if photo.get("access_key"):
             attachment += "_" + photo["access_key"]
+        return attachment
+
+    def upload_gif(self, peer_id, content):
+        server = self.call("docs.getMessagesUploadServer", peer_id=peer_id, type="doc")
+        url = server.get("upload_url", "")
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise APIError("VK upload", "INVALID_UPLOAD_URL")
+        boundary = "bridge-" + uuid.uuid4().hex
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+                'filename="sticker.gif"\r\nContent-Type: image/gif\r\n\r\n').encode()
+        body += content + f"\r\n--{boundary}--\r\n".encode()
+        uploaded = self.transport.request(url, "VK upload", body,
+                                          {"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        if not isinstance(uploaded, dict) or not uploaded.get("file"):
+            raise APIError("VK upload", "INVALID_DOCUMENT_RESPONSE", True)
+        saved = self.call("docs.save", file=uploaded["file"], title="sticker.gif")
+        doc = saved.get("doc", {}) if isinstance(saved, dict) else {}
+        if "id" not in doc or "owner_id" not in doc:
+            raise APIError("VK upload", "INVALID_DOCUMENT_SAVE", True)
+        attachment = f"doc{doc['owner_id']}_{doc['id']}"
+        if doc.get("access_key"):
+            attachment += "_" + doc["access_key"]
         return attachment
 
     def send(self, peer_id, text, attachments, random_id):

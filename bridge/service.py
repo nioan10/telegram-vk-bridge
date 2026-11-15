@@ -7,6 +7,7 @@ import time
 from .api import APIError
 from .config import ConfigError
 from .content import render, split_text
+from .stickers import convert_sticker
 from .state import Store, process_lock
 
 
@@ -53,7 +54,8 @@ def deliver(job, store, cfg, tg, vk, stop=None):
         return
     plan = json.loads(job["plan"]) if job["plan"] else None
     if plan is None:
-        text, photos = render(json.loads(job["body"]), cfg)
+        items = json.loads(job["body"])
+        text, photos = render(items, cfg)
         attachments = []
         for photo in photos:
             if stop and stop.is_set():
@@ -65,6 +67,22 @@ def deliver(job, store, cfg, tg, vk, stop=None):
                 store.heartbeat()
                 attachment = vk.upload_photo(cfg.vk_peer_id, content)
                 store.upload(job["id"], photo["file_id"], attachment)
+            attachments.append(attachment)
+        for item in items:
+            sticker = item.get("sticker")
+            if not sticker:
+                continue
+            if stop and stop.is_set():
+                return
+            store.heartbeat()
+            key = "sticker:" + sticker["file_id"]
+            attachment = store.upload(job["id"], key)
+            if not attachment:
+                content, kind = convert_sticker(tg.sticker(sticker["file_id"]), sticker)
+                store.heartbeat()
+                attachment = (vk.upload_gif(cfg.vk_peer_id, content) if kind == "gif"
+                              else vk.upload_photo(cfg.vk_peer_id, content, png=True))
+                store.upload(job["id"], key, attachment)
             attachments.append(attachment)
         chunks = split_text(text) or [""]
         plan = [{"text": chunk, "attachments": attachments[:10] if i == 0 else []}
