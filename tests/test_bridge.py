@@ -285,6 +285,34 @@ class StateTests(StoreFixture):
 
 
 class DeliveryTests(StoreFixture):
+    def test_command_reply_survives_network_error_and_restart(self):
+        command = private_update(1, "/tag off")
+        self.store.ingest([command], CFG, now=101)
+        tg = Mock(); tg.call.side_effect = APIError("Telegram", "NETWORK", True, 60)
+        with patch("bridge.state.time.time", return_value=102), self.assertLogs(level="WARNING"):
+            send_command_replies(self.store, CFG, tg)
+        self.assertFalse(self.store.due_replies(now=161))
+        self.store.close(); self.store = Store(self.directory)
+        self.store.ingest([command], CFG, now=163)
+        self.assertEqual(self.store.get("hashtag"), "off")
+        self.assertEqual(len(self.store.due_replies(now=163)), 1)
+        tg.call.side_effect = None
+        with patch("bridge.state.time.time", return_value=163):
+            send_command_replies(self.store, CFG, tg)
+        self.assertEqual(tg.call.call_args.kwargs["chat_id"], CFG.telegram_owner_id)
+        self.assertIn("без фильтра", tg.call.call_args.kwargs["text"])
+        self.assertFalse(self.store.due_replies(now=999))
+        self.assertEqual(self.store.get("last_reply"), "163")
+        self.assertFalse(self.store.due(now=999))
+
+    def test_rejected_reply_does_not_block_later_commands(self):
+        self.store.ingest([private_update(1, "/status"), private_update(2, "/help")], CFG, now=101)
+        tg = Mock(); tg.call.side_effect = [APIError("Telegram", 403), True]
+        with self.assertLogs(level="WARNING"):
+            send_command_replies(self.store, CFG, tg)
+        self.assertEqual(tg.call.call_count, 2)
+        self.assertFalse(self.store.due_replies(now=999))
+
     def test_private_ack_failure_does_not_repeat_vk_delivery(self):
         self.store.ingest([private_update()], CFG, now=101)
         tg, vk = Mock(), Mock()
@@ -378,6 +406,7 @@ class APITests(unittest.TestCase):
         params = transport.form.call_args.args[2]
         self.assertEqual(params["offset"], 42)
         self.assertEqual(json.loads(params["allowed_updates"]), ["message"])
+        self.assertEqual(transport.form.call_args.kwargs["timeout"], 10)
 
     def test_api_errors_never_include_token_or_server_description(self):
         transport = Mock()

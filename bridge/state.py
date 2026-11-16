@@ -63,6 +63,10 @@ class Store:
                 job_id TEXT NOT NULL, file_id TEXT NOT NULL, attachment TEXT NOT NULL,
                 PRIMARY KEY (job_id, file_id)
             );
+            CREATE TABLE IF NOT EXISTS command_replies (
+                message_id INTEGER PRIMARY KEY, text TEXT NOT NULL,
+                due REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0
+            );
         """)
 
     def close(self):
@@ -117,6 +121,8 @@ class Store:
                     if new_tag:
                         self.put("hashtag", new_tag)
                     replies.append({"message_id": message["message_id"], "text": reply})
+                    self.db.execute("INSERT OR IGNORE INTO command_replies(message_id,text) VALUES(?,?)",
+                                    (message["message_id"], reply))
                 if ((group or private) and not command
                         and message.get("date", 0) >= cutoff
                         and not message.get("has_protected_content")):
@@ -143,7 +149,26 @@ class Store:
                                     (job_id, json.dumps(items, ensure_ascii=False), int(selected),
                                      now + cfg.album_wait if album else now))
                 self.put("offset", int(update["update_id"]) + 1)
+            self.put("last_poll", int(now))
         return replies
+
+    def due_replies(self, now=None):
+        return self.db.execute("SELECT * FROM command_replies WHERE due<=? ORDER BY message_id LIMIT 10",
+                               (time.time() if now is None else now,)).fetchall()
+
+    def finish_reply(self, message_id, delivered=True):
+        with self.db:
+            self.db.execute("DELETE FROM command_replies WHERE message_id=?", (message_id,))
+            if delivered:
+                self.put("last_reply", int(time.time()))
+
+    def retry_reply(self, reply, error, now=None):
+        now = time.time() if now is None else now
+        attempts = reply["attempts"] + 1
+        delay = max(error.retry_after, min(300, 2 ** min(attempts, 9)))
+        with self.db:
+            self.db.execute("UPDATE command_replies SET attempts=?,due=? WHERE message_id=?",
+                            (attempts, now + delay, reply["message_id"]))
 
     def due(self, now=None):
         return self.db.execute("SELECT * FROM jobs WHERE status='pending' AND due<=? ORDER BY due LIMIT 10",
@@ -203,6 +228,6 @@ def read_status(directory):
         raise ConfigError("База ещё не создана: сначала запустите run.")
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
         counts = dict(db.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status"))
-        meta = dict(db.execute("SELECT key,value FROM meta WHERE key IN ('heartbeat','last_sent','hashtag')"))
+        meta = dict(db.execute("SELECT key,value FROM meta WHERE key IN ('heartbeat','last_sent','hashtag','last_poll','last_reply')"))
         failures = db.execute("SELECT id,error FROM jobs WHERE status='failed' ORDER BY due LIMIT 10").fetchall()
     return counts, meta, failures

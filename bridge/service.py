@@ -11,14 +11,19 @@ from .stickers import convert_sticker
 from .state import Store, process_lock
 
 
-def send_command_replies(replies, cfg, tg):
-    for reply in replies:
+def send_command_replies(store, cfg, tg):
+    for reply in store.due_replies():
         try:
             tg.call("sendMessage", chat_id=cfg.telegram_owner_id, text=reply["text"],
                     reply_parameters=json.dumps({"message_id": reply["message_id"], "allow_sending_without_reply": True}))
+            store.finish_reply(reply["message_id"])
+            logging.info("Ответ на команду доставлен: %s", reply["message_id"])
         except APIError as error:
-            # Settings and offset are already committed; a lost reply cannot undo them.
             logging.warning("Не удалось отправить ответ на команду: %s", error)
+            if error.retryable:
+                store.retry_reply(reply, error)
+                break
+            store.finish_reply(reply["message_id"], delivered=False)
 
 
 def check(cfg, tg, vk):
@@ -132,13 +137,13 @@ def run(cfg, tg, vk):
                 if time.monotonic() >= next_poll:
                     try:
                         updates = tg.updates(store.offset)
-                        replies = store.ingest(updates, cfg)
-                        send_command_replies(replies, cfg, tg)
+                        store.ingest(updates, cfg)
                     except APIError as error:
                         if not error.retryable:
                             raise
                         logging.warning("Приём временно недоступен: %s", error)
                         next_poll = time.monotonic() + max(5, error.retry_after)
+                send_command_replies(store, cfg, tg)
                 # Drain full batches before closing albums that straddle batches.
                 if len(updates) < 100 and time.monotonic() >= next_delivery:
                     for job in store.due():

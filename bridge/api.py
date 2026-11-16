@@ -75,9 +75,9 @@ class Telegram:
         self.token = token
         self.transport = transport or Transport()
 
-    def call(self, method, **params):
+    def call(self, method, *, request_timeout=15, **params):
         result = self.transport.form(
-            f"https://api.telegram.org/bot{self.token}/{method}", "Telegram", params)
+            f"https://api.telegram.org/bot{self.token}/{method}", "Telegram", params, timeout=request_timeout)
         if not isinstance(result, dict) or "ok" not in result:
             raise APIError("Telegram", "INVALID_RESPONSE", True)
         if not result["ok"]:
@@ -87,7 +87,7 @@ class Telegram:
         return result["result"]
 
     def updates(self, offset=0, timeout=2):
-        return self.call("getUpdates", offset=offset, timeout=timeout, limit=100,
+        return self.call("getUpdates", request_timeout=timeout + 8, offset=offset, timeout=timeout, limit=100,
                          allowed_updates=json.dumps(["message"]))
 
     def photo(self, file_id):
