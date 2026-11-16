@@ -2,6 +2,7 @@
 import http.client
 import json
 import time
+import unicodedata
 import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, quote
@@ -10,6 +11,19 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 MAX_PHOTO_BYTES = 20 * 1024 * 1024
 MAX_STICKER_BYTES = 4 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+
+
+def document_filename(value):
+    # Only a display filename: never a path or untrusted multipart header.
+    name = str(value or "file.bin").replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join("_" if char == '"' or unicodedata.category(char).startswith("C") else char for char in name)
+    name = name.strip(" .") or "file.bin"
+    if len(name) > 128:
+        stem, dot, suffix = name.rpartition(".")
+        extension = dot + suffix if dot and len(suffix) <= 16 else ""
+        name = name[:128-len(extension)] + extension
+    return name
 
 
 class APIError(Exception):
@@ -96,6 +110,9 @@ class Telegram:
     def sticker(self, file_id):
         return self.download(file_id, MAX_STICKER_BYTES, "STICKER_TOO_LARGE")
 
+    def document(self, file_id):
+        return self.download(file_id, MAX_DOCUMENT_BYTES, "DOCUMENT_TOO_LARGE")
+
     def download(self, file_id, limit, size_error):
         info = self.call("getFile", file_id=file_id)
         if info.get("file_size", 0) > limit:
@@ -160,6 +177,12 @@ class VK:
         return attachment
 
     def upload_gif(self, peer_id, content):
+        return self.upload_document(peer_id, content, "sticker.gif", mime="image/gif")
+
+    def upload_document(self, peer_id, content, filename="file.bin", *, mime="application/octet-stream"):
+        if len(content) > MAX_DOCUMENT_BYTES:
+            raise APIError("Telegram", "DOCUMENT_TOO_LARGE")
+        filename = document_filename(filename)
         server = self.call("docs.getMessagesUploadServer", peer_id=peer_id, type="doc")
         url = server.get("upload_url", "")
         parsed = urlsplit(url)
@@ -167,13 +190,13 @@ class VK:
             raise APIError("VK upload", "INVALID_UPLOAD_URL")
         boundary = "bridge-" + uuid.uuid4().hex
         body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
-                'filename="sticker.gif"\r\nContent-Type: image/gif\r\n\r\n').encode()
+                f'filename="{filename}"\r\nContent-Type: {mime}\r\n\r\n').encode()
         body += content + f"\r\n--{boundary}--\r\n".encode()
         uploaded = self.transport.request(url, "VK upload", body,
                                           {"Content-Type": f"multipart/form-data; boundary={boundary}"})
         if not isinstance(uploaded, dict) or not uploaded.get("file"):
             raise APIError("VK upload", "INVALID_DOCUMENT_RESPONSE", True)
-        saved = self.call("docs.save", file=uploaded["file"], title="sticker.gif")
+        saved = self.call("docs.save", file=uploaded["file"], title=filename)
         doc = saved.get("doc", {}) if isinstance(saved, dict) else {}
         if "id" not in doc or "owner_id" not in doc:
             raise APIError("VK upload", "INVALID_DOCUMENT_SAVE", True)

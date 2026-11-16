@@ -89,6 +89,21 @@ def deliver(job, store, cfg, tg, vk, stop=None):
                               else vk.upload_photo(cfg.vk_peer_id, content, png=True))
                 store.upload(job["id"], key, attachment)
             attachments.append(attachment)
+        for item in items:
+            document = item.get("document")
+            if not document:
+                continue
+            if stop and stop.is_set():
+                return
+            store.heartbeat()
+            key = "document:" + document["file_id"]
+            attachment = store.upload(job["id"], key)
+            if not attachment:
+                content = tg.document(document["file_id"])
+                store.heartbeat()
+                attachment = vk.upload_document(cfg.vk_peer_id, content, document.get("file_name"))
+                store.upload(job["id"], key, attachment)
+            attachments.append(attachment)
         chunks = split_text(text) or [""]
         plan = [{"text": chunk, "attachments": attachments[:10] if i == 0 else []}
                 for i, chunk in enumerate(chunks)]
