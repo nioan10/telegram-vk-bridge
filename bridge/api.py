@@ -12,6 +12,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 MAX_PHOTO_BYTES = 20 * 1024 * 1024
 MAX_STICKER_BYTES = 4 * 1024 * 1024
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+MAX_VOICE_BYTES = 20 * 1024 * 1024
 
 
 def document_filename(value):
@@ -113,6 +114,9 @@ class Telegram:
     def document(self, file_id):
         return self.download(file_id, MAX_DOCUMENT_BYTES, "DOCUMENT_TOO_LARGE")
 
+    def voice(self, file_id):
+        return self.download(file_id, MAX_VOICE_BYTES, "VOICE_TOO_LARGE")
+
     def download(self, file_id, limit, size_error):
         info = self.call("getFile", file_id=file_id)
         if info.get("file_size", 0) > limit:
@@ -182,8 +186,26 @@ class VK:
     def upload_document(self, peer_id, content, filename="file.bin", *, mime="application/octet-stream"):
         if len(content) > MAX_DOCUMENT_BYTES:
             raise APIError("Telegram", "DOCUMENT_TOO_LARGE")
+        return self._upload_document(peer_id, content, filename, mime, "doc")
+
+    def upload_voice(self, peer_id, content, mime=None):
+        if len(content) > MAX_VOICE_BYTES:
+            raise APIError("Telegram", "VOICE_TOO_LARGE")
+        if not content:
+            raise APIError("Telegram", "EMPTY_VOICE")
+        # Telegram voice notes are normally OGG/Opus; bots can also supply MP3/M4A.
+        # Keep bytes intact and never interpolate a message's MIME value into headers.
+        filename, content_type = {
+            "audio/mpeg": ("voice.mp3", "audio/mpeg"),
+            "audio/mp3": ("voice.mp3", "audio/mpeg"),
+            "audio/mp4": ("voice.m4a", "audio/mp4"),
+            "audio/x-m4a": ("voice.m4a", "audio/mp4"),
+        }.get(mime, ("voice.ogg", "audio/ogg"))
+        return self._upload_document(peer_id, content, filename, content_type, "audio_message")
+
+    def _upload_document(self, peer_id, content, filename, mime, kind):
         filename = document_filename(filename)
-        server = self.call("docs.getMessagesUploadServer", peer_id=peer_id, type="doc")
+        server = self.call("docs.getMessagesUploadServer", peer_id=peer_id, type=kind)
         url = server.get("upload_url", "")
         parsed = urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -197,9 +219,12 @@ class VK:
         if not isinstance(uploaded, dict) or not uploaded.get("file"):
             raise APIError("VK upload", "INVALID_DOCUMENT_RESPONSE", True)
         saved = self.call("docs.save", file=uploaded["file"], title=filename)
-        doc = saved.get("doc", {}) if isinstance(saved, dict) else {}
-        if "id" not in doc or "owner_id" not in doc:
-            raise APIError("VK upload", "INVALID_DOCUMENT_SAVE", True)
+        doc = saved.get(kind) if isinstance(saved, dict) else None
+        if not isinstance(doc, dict) or "id" not in doc or "owner_id" not in doc:
+            code = "INVALID_VOICE_SAVE" if kind == "audio_message" else "INVALID_DOCUMENT_SAVE"
+            raise APIError("VK upload", code, True)
+        # Voice notes are uploaded through docs; this attachment reference retains
+        # their audio_message type and player, rather than uploading an ordinary file.
         attachment = f"doc{doc['owner_id']}_{doc['id']}"
         if doc.get("access_key"):
             attachment += "_" + doc["access_key"]

@@ -1,9 +1,9 @@
-from .api import MAX_PHOTO_BYTES, MAX_DOCUMENT_BYTES, APIError
+from .api import MAX_PHOTO_BYTES, MAX_DOCUMENT_BYTES, MAX_VOICE_BYTES, APIError
 
 
 UNSUPPORTED = {
     "video": "видео", "animation": "GIF",
-    "voice": "голосовое сообщение", "audio": "аудио", "video_note": "видеокружок",
+    "audio": "аудио", "video_note": "видеокружок",
     "poll": "опрос", "contact": "контакт",
     "location": "геопозиция", "venue": "место", "paid_media": "платное медиа",
     "story": "история", "dice": "игровой эмодзи",
@@ -23,7 +23,7 @@ def extract(message, config):
     entities = message.get("entities") if "text" in message else message.get("caption_entities")
     entities = entities or []
     # Service updates (joins, pins, title changes) are not user messages to relay.
-    has_content = bool(text or message.get("photo") or message.get("sticker") or message.get("document")
+    has_content = bool(text or message.get("photo") or message.get("sticker") or message.get("document") or message.get("voice")
                        or any(key in message for key in UNSUPPORTED))
     selected = (config.hashtag == "off" and has_content) or any(e.get("type") == "hashtag"
                    and entity_text(text, e).casefold() == config.hashtag.casefold()
@@ -55,12 +55,16 @@ def extract(message, config):
     document = message.get("document")
     if document:
         document = {key: document[key] for key in ("file_id", "file_size", "file_name") if key in document}
+    voice = message.get("voice")
+    if voice:
+        voice = {key: voice[key] for key in ("file_id", "file_size", "mime_type") if key in voice}
     return {
         "id": message["message_id"], "selected": selected,
         "text": encoded.decode("utf-16-le").strip(),
         "author": author or "Участник Telegram", "photo": photo,
         "sticker": sticker,
         "document": document,
+        "voice": voice,
         "unsupported": [label for key, label in UNSUPPORTED.items() if key in message
                         and not (key == "animation" and document)],
     }
@@ -90,11 +94,13 @@ def render(items, config):
     text = "\n\n".join(texts)
     if config.include_author:
         text = items[0]["author"] + " (Telegram)\n" + text
-    if not text.strip() and not any(item["photo"] or item.get("sticker") or item.get("document") for item in items):
+    if not text.strip() and not any(item["photo"] or item.get("sticker") or item.get("document") or item.get("voice") for item in items):
         text = "[Сообщение отмечено хештегом.]"
     photos = [item["photo"] for item in items if item["photo"]]
     if any(photo.get("file_size", 0) > MAX_PHOTO_BYTES for photo in photos):
         raise APIError("Telegram", "PHOTO_TOO_LARGE")
     if any((item.get("document") or {}).get("file_size", 0) > MAX_DOCUMENT_BYTES for item in items):
         raise APIError("Telegram", "DOCUMENT_TOO_LARGE")
+    if any((item.get("voice") or {}).get("file_size", 0) > MAX_VOICE_BYTES for item in items):
+        raise APIError("Telegram", "VOICE_TOO_LARGE")
     return text.strip(), photos
