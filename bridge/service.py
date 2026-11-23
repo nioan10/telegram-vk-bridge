@@ -148,6 +148,21 @@ def deliver(job, store, cfg, tg, vk, stop=None):
             logging.warning("VK доставлено, подтверждение в Telegram недоступно: %s", error)
 
 
+def deliver_pending(store, cfg, tg, vk, stop=None):
+    for job in store.due():
+        if stop and stop.is_set():
+            break
+        try:
+            deliver(job, store, cfg, tg, vk, stop)
+        except APIError as error:
+            store.failure(job, error)
+            logging.warning("Доставка %s: %s (%s); следующие задания ждут", job["id"], error,
+                            "повтор запланирован" if error.retryable else "очередь остановлена; /status для действий")
+            # The batch was selected before delivery. Even Telegram download errors
+            # or permanent failures must prevent the rest of this batch overtaking it.
+            break
+
+
 def run(cfg, tg, vk):
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -160,7 +175,6 @@ def run(cfg, tg, vk):
             logging.info("Бот запущен: Telegram %s → VK %s, фильтр %s",
                          cfg.telegram_chat_id, cfg.vk_peer_id, store.get("hashtag"))
             next_poll = 0
-            next_delivery = 0
             while not stop.is_set():
                 store.heartbeat()
                 updates = []
@@ -175,20 +189,8 @@ def run(cfg, tg, vk):
                         next_poll = time.monotonic() + max(5, error.retry_after)
                 send_command_replies(store, cfg, tg)
                 # Drain full batches before closing albums that straddle batches.
-                if len(updates) < 100 and time.monotonic() >= next_delivery:
-                    for job in store.due():
-                        if stop.is_set():
-                            break
-                        try:
-                            deliver(job, store, cfg, tg, vk, stop)
-                        except APIError as error:
-                            store.failure(job, error)
-                            logging.warning("Доставка %s: %s (%s)", job["id"], error,
-                                            "повтор запланирован" if error.retryable else "нужно исправить доступ/вложение и выполнить retry-failed")
-                            if error.retryable and error.service.startswith("VK"):
-                                next_delivery = time.monotonic() + max(
-                                    error.retry_after, min(300, 2 ** min(job["attempts"] + 1, 9)))
-                                break
+                if len(updates) < 100:
+                    deliver_pending(store, cfg, tg, vk, stop)
                 stop.wait(0.2)
         finally:
             store.close()

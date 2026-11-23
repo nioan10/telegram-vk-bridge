@@ -68,6 +68,19 @@ class Store:
                 due REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0
             );
         """)
+        # Retry deadlines and album debounce must never change a message's place.
+        # Older databases retain their original insertion order during migration.
+        with self.db:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}
+            if "queue_order" not in columns:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN queue_order INTEGER")
+            order = self.db.execute("SELECT COALESCE(MAX(queue_order),0) FROM jobs").fetchone()[0]
+            missing = self.db.execute("SELECT id FROM jobs WHERE queue_order IS NULL ORDER BY rowid").fetchall()
+            for row in missing:
+                order += 1
+                self.db.execute("UPDATE jobs SET queue_order=? WHERE id=?", (order, row["id"]))
+            self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_order ON jobs(queue_order)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS jobs_unfinished_order ON jobs(queue_order) WHERE status IN ('pending','failed')")
 
     def close(self):
         self.db.close()
@@ -102,7 +115,7 @@ class Store:
         cutoff = int(self.get("started_at", int(now)))
         replies = []
         with self.db:
-            for update in updates:
+            for update in sorted(updates, key=lambda item: int(item["update_id"])):
                 if int(update["update_id"]) < self.offset:
                     continue
                 message = update.get("message", {})
@@ -117,7 +130,9 @@ class Store:
                 current_cfg = replace(cfg, hashtag=self.get("hashtag", cfg.hashtag))
                 if command and message.get("date", 0) >= cutoff:
                     counts = dict(self.db.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status"))
-                    new_tag, reply = owner_command(message["text"], current_cfg.hashtag, cfg.telegram_owner_id, counts)
+                    queue_reply = self.queue_command(message["text"])
+                    new_tag, reply = (None, queue_reply) if queue_reply is not None else owner_command(
+                        message["text"], current_cfg.hashtag, cfg.telegram_owner_id, counts, self.queue_head())
                     if new_tag:
                         self.put("hashtag", new_tag)
                     replies.append({"message_id": message["message_id"], "text": reply})
@@ -143,11 +158,13 @@ class Store:
                             if not any(old["id"] == item["id"] for old in items):
                                 items.append(item)
                                 selected = any(part["selected"] for part in items)
-                                self.db.execute("""INSERT INTO jobs(id,body,selected,due) VALUES(?,?,?,?)
+                                order = existing["queue_order"] if existing else self.db.execute(
+                                    "SELECT COALESCE(MAX(queue_order),0)+1 FROM jobs").fetchone()[0]
+                                self.db.execute("""INSERT INTO jobs(id,body,selected,due,queue_order) VALUES(?,?,?,?,?)
                                     ON CONFLICT(id) DO UPDATE SET body=excluded.body,
                                     selected=excluded.selected,due=excluded.due""",
                                     (job_id, json.dumps(items, ensure_ascii=False), int(selected),
-                                     now + cfg.album_wait if album else now))
+                                     now + cfg.album_wait if album else now, order))
                 self.put("offset", int(update["update_id"]) + 1)
             self.put("last_poll", int(now))
         return replies
@@ -170,9 +187,40 @@ class Store:
             self.db.execute("UPDATE command_replies SET attempts=?,due=? WHERE message_id=?",
                             (attempts, now + delay, reply["message_id"]))
 
+    def queue_head(self):
+        return self.db.execute("SELECT * FROM jobs WHERE status IN ('pending','failed') ORDER BY queue_order LIMIT 1").fetchone()
+
     def due(self, now=None):
-        return self.db.execute("SELECT * FROM jobs WHERE status='pending' AND due<=? ORDER BY due LIMIT 10",
-                               (now if now is not None else time.time(),)).fetchall()
+        now = now if now is not None else time.time()
+        jobs = self.db.execute("SELECT * FROM jobs WHERE status IN ('pending','failed') ORDER BY queue_order LIMIT 10").fetchall()
+        ready = []
+        for job in jobs:
+            if job["status"] != "pending" or job["due"] > now:
+                break
+            ready.append(job)
+        return ready
+
+    def queue_command(self, text):
+        """Owner-only commands, inside ingest's transaction with its update checkpoint."""
+        words = text.split()
+        command = words[0].split("@", 1)[0].casefold()
+        if command not in ("/retry", "/skip"):
+            return None
+        if command == "/retry" and len(words) != 1:
+            return "Используйте /retry без параметров: повторится первое задание с постоянной ошибкой."
+        if command == "/skip" and len(words) != 2:
+            return "Укажите ID остановившего очередь задания: /skip ID. ID есть в /status."
+        head = self.queue_head()
+        if head is None or head["status"] != "failed":
+            return "В начале очереди нет задания с постоянной ошибкой. Временные ошибки повторяются автоматически."
+        if command == "/retry":
+            self.db.execute("UPDATE jobs SET status='pending',due=0,attempts=0,error=NULL WHERE id=?", (head["id"],))
+            return f"Задание {head['id']} возвращено на отправку. Следующие сообщения ждут его завершения."
+        if words[1] != head["id"]:
+            return "Это не первое остановившее очередь задание. Проверьте его ID через /status."
+        self.db.execute("UPDATE jobs SET status='skipped',body='[]',plan=NULL,error=NULL WHERE id=?", (head["id"],))
+        self.db.execute("DELETE FROM uploads WHERE job_id=?", (head["id"],))
+        return f"Неотправленная часть задания {head['id']} пропущена. Очередь продолжит работу."
 
     def upload(self, job_id, file_id, attachment=None):
         if attachment is not None:
